@@ -54,14 +54,7 @@ app.use(
   })
 );
 
-/* =========================
-   PRE-FLIGHT
-========================= */
 
-app.options('*', cors({
-  origin: CLIENT_URL,
-  credentials: true
-}));
 
 /* =========================
    SECURITY
