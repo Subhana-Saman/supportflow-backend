@@ -59,8 +59,9 @@ export const sendMessage = async (req, res) => {
   try {
     const { message } = req.body;
     const ticketId = req.params.id;
+    const hasFile = !!req.file;
 
-    if (!message || message.trim() === '') {
+    if ((!message || message.trim() === '') && !hasFile) {
       return res.status(400).json({
         success: false,
         message: 'Message cannot be empty'
@@ -94,19 +95,33 @@ export const sendMessage = async (req, res) => {
       });
     }
 
-    // Don't allow messages on resolved tickets
-    if (ticket.status === 'Resolved') {
+    // Don't allow messages on resolved or cancelled tickets
+    if (ticket.status === 'Resolved' || ticket.status === 'Cancelled') {
       return res.status(400).json({
         success: false,
-        message: 'Cannot send messages on resolved tickets'
+        message: `Cannot send messages on a ${ticket.status.toLowerCase()} ticket`
       });
     }
 
-    const newMessage = await Message.create({
+    const messageData = {
       ticket: ticketId,
       sender: req.user.id,
-      message: message.trim()
-    });
+      message: message ? message.trim() : ''
+    };
+
+    // Store the file inline as a base64 data URL so it works the same on
+    // serverless hosts (no local disk persistence needed) and stays in Mongo.
+    if (hasFile) {
+      const base64 = req.file.buffer.toString('base64');
+      messageData.attachment = {
+        fileName: req.file.originalname,
+        fileType: req.file.mimetype,
+        fileSize: req.file.size,
+        fileUrl: `data:${req.file.mimetype};base64,${base64}`
+      };
+    }
+
+    const newMessage = await Message.create(messageData);
 
     await newMessage.populate('sender', 'name email role avatar');
 
@@ -114,6 +129,21 @@ export const sendMessage = async (req, res) => {
     if (req.user.role === 'agent' && ticket.status === 'Assigned') {
       ticket.status = 'In Progress';
       await ticket.save();
+    }
+
+    // Broadcast to everyone in the ticket room (the other party's UI
+    // updates instantly without a refresh). The sender also receives this,
+    // but the frontend de-dupes by message _id so it isn't shown twice.
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.to(`ticket:${ticketId}`).emit('messageReceived', {
+          message: newMessage,
+          ticketId
+        });
+      }
+    } catch (err) {
+      console.error('Socket emit error (messageReceived):', err);
     }
 
     res.status(201).json({

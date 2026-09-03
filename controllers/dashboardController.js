@@ -66,6 +66,26 @@ export const getStats = async (req, res) => {
         { $group: { _id: '$category', count: { $sum: 1 } } }
       ]);
 
+      // Tickets by priority
+      const ticketsByPriority = await Ticket.aggregate([
+        { $group: { _id: '$priority', count: { $sum: 1 } } }
+      ]);
+
+      // Tickets by status
+      const ticketsByStatus = await Ticket.aggregate([
+        { $group: { _id: '$status', count: { $sum: 1 } } }
+      ]);
+
+      // Agent workload — how many active (non-resolved, non-cancelled) tickets each agent holds
+      const agentWorkload = await Ticket.aggregate([
+        { $match: { assignedAgent: { $ne: null }, status: { $nin: ['Resolved', 'Cancelled'] } } },
+        { $group: { _id: '$assignedAgent', activeTickets: { $sum: 1 } } },
+        { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'agent' } },
+        { $unwind: '$agent' },
+        { $project: { _id: 0, agentId: '$agent._id', name: '$agent.name', activeTickets: 1 } },
+        { $sort: { activeTickets: -1 } }
+      ]);
+
       stats = {
         totalTickets,
         newTickets,
@@ -75,7 +95,10 @@ export const getStats = async (req, res) => {
         highPriorityTickets,
         totalCustomers,
         totalAgents,
-        ticketsByCategory
+        ticketsByCategory,
+        ticketsByPriority,
+        ticketsByStatus,
+        agentWorkload
       };
     }
 

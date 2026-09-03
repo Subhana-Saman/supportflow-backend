@@ -1,11 +1,23 @@
 import Ticket from '../models/Ticket.js';
 import User from '../models/User.js';
 import jwt from 'jsonwebtoken';
+import cookie from 'cookie';
 
 const setupSocket = (io) => {
   io.use(async (socket, next) => {
     try {
-      const token = socket.handshake.auth.token;
+      // The JWT lives in an HTTP-only cookie, so client-side JS can't read
+      // it to send as `auth.token`. Pull it from the handshake's cookie
+      // header instead (sent automatically because the client connects
+      // with withCredentials: true). Still accept an explicit auth.token
+      // as a fallback (useful for non-browser clients / testing).
+      let token = socket.handshake.auth?.token;
+
+      if (!token && socket.handshake.headers.cookie) {
+        const cookies = cookie.parse(socket.handshake.headers.cookie);
+        token = cookies.token;
+      }
+
       if (!token) {
         return next(new Error('Authentication required'));
       }
@@ -35,10 +47,14 @@ const setupSocket = (io) => {
           return socket.emit('error', { message: 'Ticket not found' });
         }
 
-        // Verify authorization
+        // Verify authorization (mirrors the REST API's rule in
+        // ticketController.js: an agent is allowed on a ticket unless it's
+        // already assigned to a *different* agent — an unassigned ticket
+        // must stay open to any agent so they can pick it up).
         const userId = socket.user._id.toString();
         const isCustomer = ticket.customer.toString() === userId;
-        const isAgent = ticket.assignedAgent && ticket.assignedAgent.toString() === userId;
+        const isAssignedElsewhere = ticket.assignedAgent && ticket.assignedAgent.toString() !== userId;
+        const isAgent = socket.user.role === 'agent' && !isAssignedElsewhere;
         const isAdmin = socket.user.role === 'admin';
 
         if (!isCustomer && !isAgent && !isAdmin) {
@@ -73,10 +89,11 @@ const setupSocket = (io) => {
           return socket.emit('error', { message: 'Ticket not found' });
         }
 
-        // Verify authorization
+        // Verify authorization (see joinTicket above for the rule)
         const userId = socket.user._id.toString();
         const isCustomer = ticket.customer.toString() === userId;
-        const isAgent = ticket.assignedAgent && ticket.assignedAgent.toString() === userId;
+        const isAssignedElsewhere = ticket.assignedAgent && ticket.assignedAgent.toString() !== userId;
+        const isAgent = socket.user.role === 'agent' && !isAssignedElsewhere;
         const isAdmin = socket.user.role === 'admin';
 
         if (!isCustomer && !isAgent && !isAdmin) {

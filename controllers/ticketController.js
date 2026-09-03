@@ -1,6 +1,33 @@
 import Ticket from '../models/Ticket.js';
 import User from '../models/User.js';
+import TicketActivity from '../models/TicketActivity.js';
 import { generateTicketNumber } from '../utils/generateTicketNumber.js';
+
+// Small helper so every action logs a consistent, timestamped activity entry.
+const logActivity = async (ticketId, actorId, action, description) => {
+  try {
+    await TicketActivity.create({ ticket: ticketId, actor: actorId, action, description });
+  } catch (err) {
+    // Never let a logging failure break the actual ticket action
+    console.error('Activity log error:', err);
+  }
+};
+
+// Broadcasts the updated ticket to everyone currently viewing it (customer +
+// assigned agent) so status/category/priority/assignment changes made via
+// the REST API show up instantly on the other side, with no page refresh.
+const emitTicketUpdate = (req, ticket) => {
+  try {
+    const io = req.app.get('io');
+    if (!io) return;
+    io.to(`ticket:${ticket._id}`).emit('ticketStatusUpdated', {
+      ticketId: ticket._id,
+      ticket
+    });
+  } catch (err) {
+    console.error('Socket emit error (ticketStatusUpdated):', err);
+  }
+};
 
 // @desc    Create ticket
 // @route   POST /api/tickets
@@ -24,6 +51,8 @@ export const createTicket = async (req, res) => {
 
     // Populate customer info
     await ticket.populate('customer', 'name email');
+
+    await logActivity(ticket._id, req.user.id, 'created', `Ticket ${ticket.ticketNumber} created`);
 
     res.status(201).json({
       success: true,
@@ -189,9 +218,15 @@ export const updateTicket = async (req, res) => {
     }
 
     // Update fields
-    if (category) ticket.category = category;
-    if (priority) ticket.priority = priority;
-    if (status) {
+    if (category && category !== ticket.category) {
+      await logActivity(ticket._id, req.user.id, 'category_changed', `Category changed from ${ticket.category} to ${category}`);
+      ticket.category = category;
+    }
+    if (priority && priority !== ticket.priority) {
+      await logActivity(ticket._id, req.user.id, 'priority_changed', `Priority changed from ${ticket.priority} to ${priority}`);
+      ticket.priority = priority;
+    }
+    if (status && status !== ticket.status) {
       // Validate status transition
       if (status === 'Resolved' && !req.body.resolutionNote) {
         return res.status(400).json({
@@ -199,6 +234,7 @@ export const updateTicket = async (req, res) => {
           message: 'Resolution note is required to resolve this ticket'
         });
       }
+      await logActivity(ticket._id, req.user.id, 'status_changed', `Status changed from ${ticket.status} to ${status}`);
       ticket.status = status;
       if (status === 'Resolved') {
         ticket.resolvedAt = new Date();
@@ -208,6 +244,8 @@ export const updateTicket = async (req, res) => {
     await ticket.save();
     await ticket.populate('customer', 'name email');
     await ticket.populate('assignedAgent', 'name email');
+
+    emitTicketUpdate(req, ticket);
 
     res.status(200).json({
       success: true,
@@ -263,6 +301,10 @@ export const assignTicket = async (req, res) => {
     await ticket.populate('customer', 'name email');
     await ticket.populate('assignedAgent', 'name email');
 
+    await logActivity(ticket._id, req.user.id, 'assigned', `Ticket assigned to ${ticket.assignedAgent.name}`);
+
+    emitTicketUpdate(req, ticket);
+
     res.status(200).json({
       success: true,
       message: 'Ticket assigned successfully',
@@ -273,6 +315,115 @@ export const assignTicket = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to assign ticket'
+    });
+  }
+};
+
+// @desc    Cancel ticket (customer only, before it's picked up)
+// @route   PATCH /api/tickets/:id/cancel
+// @access  Private (Customer - owner only)
+export const cancelTicket = async (req, res) => {
+  try {
+    const ticket = await Ticket.findById(req.params.id);
+
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ticket not found'
+      });
+    }
+
+    // Only the customer who owns the ticket can cancel it
+    if (ticket.customer.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    // Can only cancel while it's still New (not yet picked up by an agent)
+    if (ticket.status !== 'New') {
+      return res.status(400).json({
+        success: false,
+        message: 'Only tickets with status "New" can be cancelled'
+      });
+    }
+
+    ticket.status = 'Cancelled';
+    await ticket.save();
+    await ticket.populate('customer', 'name email');
+    await ticket.populate('assignedAgent', 'name email');
+
+    await logActivity(ticket._id, req.user.id, 'cancelled', 'Ticket cancelled by customer');
+
+    emitTicketUpdate(req, ticket);
+
+    res.status(200).json({
+      success: true,
+      message: 'Ticket cancelled successfully',
+      data: ticket
+    });
+  } catch (error) {
+    console.error('Cancel ticket error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to cancel ticket'
+    });
+  }
+};
+
+// @desc    Reopen a resolved ticket
+// @route   PATCH /api/tickets/:id/reopen
+// @access  Private (Customer owner, or Agent/Admin)
+export const reopenTicket = async (req, res) => {
+  try {
+    const ticket = await Ticket.findById(req.params.id);
+
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ticket not found'
+      });
+    }
+
+    const isOwner = ticket.customer.toString() === req.user.id;
+    const isAssignedAgent = ticket.assignedAgent && ticket.assignedAgent.toString() === req.user.id;
+    const isAdmin = req.user.role === 'admin';
+
+    if (!isOwner && !isAssignedAgent && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    if (ticket.status !== 'Resolved') {
+      return res.status(400).json({
+        success: false,
+        message: 'Only resolved tickets can be reopened'
+      });
+    }
+
+    ticket.status = 'In Progress';
+    ticket.resolvedAt = null;
+    await ticket.save();
+    await ticket.populate('customer', 'name email');
+    await ticket.populate('assignedAgent', 'name email');
+
+    await logActivity(ticket._id, req.user.id, 'reopened', 'Ticket reopened');
+
+    emitTicketUpdate(req, ticket);
+
+    res.status(200).json({
+      success: true,
+      message: 'Ticket reopened successfully',
+      data: ticket
+    });
+  } catch (error) {
+    console.error('Reopen ticket error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to reopen ticket'
     });
   }
 };
@@ -324,6 +475,10 @@ export const resolveTicket = async (req, res) => {
     await ticket.populate('customer', 'name email');
     await ticket.populate('assignedAgent', 'name email');
 
+    await logActivity(ticket._id, req.user.id, 'resolved', 'Ticket resolved with a resolution note');
+
+    emitTicketUpdate(req, ticket);
+
     res.status(200).json({
       success: true,
       message: 'Ticket resolved successfully',
@@ -334,6 +489,54 @@ export const resolveTicket = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to resolve ticket'
+    });
+  }
+};
+
+// @desc    Get activity timeline for a ticket
+// @route   GET /api/tickets/:id/activity
+// @access  Private
+export const getTicketActivity = async (req, res) => {
+  try {
+    const ticket = await Ticket.findById(req.params.id);
+
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: 'Ticket not found'
+      });
+    }
+
+    // Same authorization rules as viewing the ticket itself
+    if (req.user.role === 'customer' && ticket.customer.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    if (req.user.role === 'agent' &&
+        ticket.assignedAgent &&
+        ticket.assignedAgent.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    const activity = await TicketActivity.find({ ticket: req.params.id })
+      .populate('actor', 'name role')
+      .sort('createdAt');
+
+    res.status(200).json({
+      success: true,
+      data: activity
+    });
+  } catch (error) {
+    console.error('Get ticket activity error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch ticket activity'
     });
   }
 };

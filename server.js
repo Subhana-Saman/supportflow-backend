@@ -32,12 +32,29 @@ app.set('trust proxy', 1);
 const CLIENT_URL =
   process.env.CLIENT_URL || 'http://localhost:5173';
 
+// Support one or more comma-separated origins in CLIENT_URL
+// (e.g. "https://supportflow.vercel.app,http://localhost:5173")
+// so both local dev and the deployed frontend work at the same time.
+const ALLOWED_ORIGINS = CLIENT_URL.split(',').map((o) => o.trim());
+
+const corsOriginHandler = (origin, callback) => {
+  // Allow non-browser requests (curl, server-to-server, health checks)
+  if (!origin) return callback(null, true);
+
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    return callback(null, true);
+  }
+
+  console.warn(`CORS blocked request from origin: ${origin}`);
+  return callback(new Error('Not allowed by CORS'));
+};
+
 /* =========================
    CORS
 ========================= */
 
 app.use(cors({
-  origin: CLIENT_URL,
+  origin: corsOriginHandler,
   credentials: true
 }));
 
@@ -86,7 +103,9 @@ app.use('/api', limiter);
    DATABASE
 ========================= */
 
-connectDB();
+connectDB().catch((err) => {
+  console.error('Failed to connect to MongoDB:', err.message);
+});
 
 /* =========================
    ROUTES
@@ -127,13 +146,18 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: CLIENT_URL,
+    origin: ALLOWED_ORIGINS,
     credentials: true,
     methods: ['GET', 'POST']
   }
 });
 
 setupSocket(io);
+
+// Make io available to REST controllers via req.app.get('io'), so ticket
+// updates and messages created through the normal API also broadcast in
+// real time to everyone in that ticket's room.
+app.set('io', io);
 
 /* =========================
    VERCEL

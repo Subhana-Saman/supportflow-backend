@@ -13,10 +13,14 @@ const messageSchema = new mongoose.Schema({
   },
   message: {
     type: String,
-    required: [true, 'Message is required'],
     trim: true,
-    minlength: [1, 'Message cannot be empty'],
     maxlength: [5000, 'Message cannot exceed 5000 characters']
+  },
+  attachment: {
+    fileName: { type: String },
+    fileUrl: { type: String },
+    fileType: { type: String },
+    fileSize: { type: Number }
   }
 }, {
   timestamps: true
