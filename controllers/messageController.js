@@ -125,26 +125,17 @@ export const sendMessage = async (req, res) => {
 
     await newMessage.populate('sender', 'name email role avatar');
 
+    // SLA tracking: record the moment an agent first responds to a ticket
+    if (req.user.role === 'agent' && !ticket.firstResponseAt) {
+      ticket.firstResponseAt = new Date();
+    }
+
     // If agent is replying, update ticket status
     if (req.user.role === 'agent' && ticket.status === 'Assigned') {
       ticket.status = 'In Progress';
-      await ticket.save();
     }
 
-    // Broadcast to everyone in the ticket room (the other party's UI
-    // updates instantly without a refresh). The sender also receives this,
-    // but the frontend de-dupes by message _id so it isn't shown twice.
-    try {
-      const io = req.app.get('io');
-      if (io) {
-        io.to(`ticket:${ticketId}`).emit('messageReceived', {
-          message: newMessage,
-          ticketId
-        });
-      }
-    } catch (err) {
-      console.error('Socket emit error (messageReceived):', err);
-    }
+    await ticket.save();
 
     res.status(201).json({
       success: true,

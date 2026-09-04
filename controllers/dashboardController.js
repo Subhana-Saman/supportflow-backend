@@ -37,13 +37,30 @@ export const getStats = async (req, res) => {
         status: { $ne: 'Resolved' }
       });
 
+      // SLA: this agent's own average response time (minutes)
+      const agentAvgResponseAgg = await Ticket.aggregate([
+        { $match: { assignedAgent: userId, firstResponseAt: { $ne: null } } },
+        {
+          $project: {
+            responseMinutes: {
+              $divide: [{ $subtract: ['$firstResponseAt', '$createdAt'] }, 60000]
+            }
+          }
+        },
+        { $group: { _id: null, avgMinutes: { $avg: '$responseMinutes' } } }
+      ]);
+      const avgResponseTimeMinutes = agentAvgResponseAgg[0]
+        ? Math.round(agentAvgResponseAgg[0].avgMinutes)
+        : null;
+
       stats = {
         totalTickets,
         newTickets,
         assignedTickets,
         inProgressTickets,
         resolvedTickets,
-        highPriorityTickets
+        highPriorityTickets,
+        avgResponseTimeMinutes
       };
     } else if (role === 'admin') {
       // Admin stats - all tickets
@@ -86,6 +103,38 @@ export const getStats = async (req, res) => {
         { $sort: { activeTickets: -1 } }
       ]);
 
+      // SLA: average time (in minutes) from ticket creation to first agent response
+      const avgResponseAgg = await Ticket.aggregate([
+        { $match: { firstResponseAt: { $ne: null } } },
+        {
+          $project: {
+            responseMinutes: {
+              $divide: [{ $subtract: ['$firstResponseAt', '$createdAt'] }, 60000]
+            }
+          }
+        },
+        { $group: { _id: null, avgMinutes: { $avg: '$responseMinutes' } } }
+      ]);
+      const avgResponseTimeMinutes = avgResponseAgg[0]
+        ? Math.round(avgResponseAgg[0].avgMinutes)
+        : null;
+
+      // SLA: average time (in minutes) from ticket creation to resolution
+      const avgResolutionAgg = await Ticket.aggregate([
+        { $match: { resolvedAt: { $ne: null } } },
+        {
+          $project: {
+            resolutionMinutes: {
+              $divide: [{ $subtract: ['$resolvedAt', '$createdAt'] }, 60000]
+            }
+          }
+        },
+        { $group: { _id: null, avgMinutes: { $avg: '$resolutionMinutes' } } }
+      ]);
+      const avgResolutionTimeMinutes = avgResolutionAgg[0]
+        ? Math.round(avgResolutionAgg[0].avgMinutes)
+        : null;
+
       stats = {
         totalTickets,
         newTickets,
@@ -98,7 +147,9 @@ export const getStats = async (req, res) => {
         ticketsByCategory,
         ticketsByPriority,
         ticketsByStatus,
-        agentWorkload
+        agentWorkload,
+        avgResponseTimeMinutes,
+        avgResolutionTimeMinutes
       };
     }
 

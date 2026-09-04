@@ -50,6 +50,10 @@ const ticketSchema = new mongoose.Schema({
     trim: true,
     maxlength: [2000, 'Resolution note cannot exceed 2000 characters']
   },
+  firstResponseAt: {
+    type: Date,
+    default: null
+  },
   resolvedAt: {
     type: Date,
     default: null
